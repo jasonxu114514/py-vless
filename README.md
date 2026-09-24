@@ -93,6 +93,8 @@ it breaks up the TLS handshake.
 
 ## Credits
 
+Thanks to the [Linux.do](https://linux.do) community.
+
 The protocol handling follows the community lineage the original scripts credit:
 [ca110us/epeius](https://github.com/ca110us/epeius),
 [3Kmfi6HP/EDtunnel](https://github.com/3Kmfi6HP/EDtunnel) and the

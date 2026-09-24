@@ -91,6 +91,8 @@ TLS 握手拆开发送。
 
 ## 致谢
 
+感谢 [Linux.do](https://linux.do) 社区。
+
 协议处理沿用原版脚本所声明的社区来源:
 [ca110us/epeius](https://github.com/ca110us/epeius)、
 [3Kmfi6HP/EDtunnel](https://github.com/3Kmfi6HP/EDtunnel),
