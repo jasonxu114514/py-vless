@@ -1,0 +1,19 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "py-vless",
+  "main": "src/entry.py",
+  "compatibility_date": "2026-09-24",
+  "compatibility_flags": ["python_workers"],
+  "observability": {
+    "enabled": true
+  },
+  // These are the fields the one-click deploy form asks for.
+  // `uuid` is required and has no usable default: Cloudflare only offers
+  // configuration for variables declared here, and the Worker refuses to serve
+  // until a real UUIDv4 is present. The placeholder below exists purely to make
+  // the form show the field; the Worker treats it as unset.
+  "vars": {
+    "uuid": "REPLACE_WITH_YOUR_UUID",
+    "preferred": "www.shopify.com,mfa.gov.ua,www.visa.cn,store.ubi.com"
+  }
+}

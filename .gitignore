@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv-workers/
+.python-version
+
+# Lockfiles are generated per-machine by pywrangler
+uv.lock
+pylock.toml
+
+# pywrangler-generated Workers-side packages (rebuilt on every sync)
+python_modules/
+
+# Wrangler / Cloudflare
+.wrangler/
+node_modules/
+.dev.vars
+worker.env
+
+# Local dev logs & measurement output
+dev.log
+*.log
+spike_results.json
+
+# Test artefacts
+.pytest_cache/
+
+# Tests are kept locally only, not committed
+tests/

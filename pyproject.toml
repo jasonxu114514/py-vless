@@ -1,0 +1,16 @@
+[project]
+name = "py-vless"
+version = "0.1.0"
+description = "A VLESS proxy on Cloudflare Workers, written in Python"
+requires-python = ">=3.13"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "workers-py",
+    "pytest",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
