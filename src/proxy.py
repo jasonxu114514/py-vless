@@ -14,6 +14,18 @@ Python objects.
 Each WS frame otherwise costs a JS->Python->JS round trip; with 16 KiB frames
 that dominates. Measured on the Free-plan-hostile profile in the README.
 
+**proxyIP fallback.** Cloudflare will not let a Worker open a connection to an
+origin that sits on Cloudflare's own edge, so sites like cloudflare.com or x.com
+fail with "proxy request failed". A proxyIP is a third-party relay (itself NOT
+behind Cloudflare) that the connection is re-made through, which is how the
+original JavaScript implementations reach those sites. It works because the
+client's TLS ClientHello already names the real destination (that is what the
+VLESS address *is*), and the relay routes on that SNI -- so the bytes are
+forwarded completely unchanged. That also means:
+  * only traffic that actually speaks TLS works through a proxyIP;
+  * a proxyIP can see the destinations of the traffic it relays;
+  * it costs the operator bandwidth, which is why public proxyIPs come and go.
+
 Platform constraints learned by experiment (see README for the full list):
   * Return the 101 BEFORE awaiting anything TCP, or the runtime kills the
     request as "hung and would never generate a response".
@@ -31,6 +43,7 @@ import js
 from js import WebSocketPair
 from workers import Response, import_from_javascript, wait_until
 
+from config import resolve_proxyip
 from vless import (
     CMD_TCP,
     HeaderIncomplete,
@@ -82,10 +95,11 @@ def _prepend(prefix: bytes, js_chunk):
 class Session:
     """One VLESS connection: WS on one side, TCP on the other."""
 
-    def __init__(self, server, queue, uuid: str):
+    def __init__(self, server, queue, uuid: str, proxyip=None):
         self.server = server
         self.queue = queue
         self.uuid = uuid
+        self.proxyip = proxyip
         self.sock = None
         self.writer = None
         # Strong refs to JS proxies/callbacks: Pyodide proxies are unhashable and
@@ -120,7 +134,29 @@ class Session:
         leftover = self._buffer[header.raw_data_index :]
         del self._buffer
 
-        self.sock = _SOCKETS.connect({"hostname": header.host, "port": header.port})
+        try:
+            await self._connect(header.host, header.port, leftover)
+        except Exception as e:  # noqa: BLE001
+            # Nothing arrived from the destination. If a proxyIP is configured,
+            # re-make the connection through it; this is what reaches sites that
+            # Cloudflare refuses to connect to directly.
+            if self.proxyip is None:
+                raise
+            print(f"direct connect failed ({e}); retrying via proxyIP {self.proxyip}")
+            await self._connect(self.proxyip.host, self.proxyip.port, leftover)
+
+        self._start_download(header.response_header)
+        await self._pump_upload()
+
+    async def _connect(self, host, port, leftover):
+        """Connect, then hand over whatever client payload has already arrived.
+
+        The payload is written before anything is read back, which is what the
+        protocol expects: for TLS the first bytes ARE the ClientHello. Bytes are
+        forwarded verbatim -- including on the proxyIP path, where the
+        ClientHello's own SNI is what tells the relay where to go.
+        """
+        self.sock = _SOCKETS.connect({"hostname": host, "port": port})
         await self.sock.opened
         self.writer = self.sock.writable.getWriter()
 
@@ -128,8 +164,15 @@ class Session:
             with js_view(leftover) as payload:
                 await self.writer.write(payload)
 
-        self._start_download(header.response_header)
-        await self._pump_upload()
+        # Anything the client sent while the connection was being established
+        # has not been written yet and would otherwise be silently dropped.
+        # (The JavaScript original loses these bytes on the retry path.)
+        while not self.queue.empty():
+            nxt = self.queue.get_nowait()
+            if nxt is None:
+                self.queue.put_nowait(None)
+                break
+            await self.writer.write(nxt)
 
     # -- upload: ws -> socket ------------------------------------------------
 
@@ -265,6 +308,8 @@ async def vless_fetch(self, request, cfg):
         if urlsplit(request.url).path != urlsplit(cfg.path).path:
             return Response("not found", status=404)
 
+    proxyip = resolve_proxyip(cfg, request.url)
+
     client, server = WebSocketPair.new().object_values()
     server.accept()
     # Without this, binary frames arrive as Blob under wrangler dev.
@@ -306,7 +351,7 @@ async def vless_fetch(self, request, cfg):
             with js_view(data) as view:
                 queue.put_nowait(view.slice())
 
-    session = Session(server, queue, cfg.uuid)
+    session = Session(server, queue, cfg.uuid, proxyip)
     task = asyncio.ensure_future(session.run())
     task_proxy = create_proxy(task)
     # JsProxy is unhashable, so strong refs live in a list (keeps them alive).

@@ -66,15 +66,21 @@ class Default(WorkerEntrypoint):
 
         if method == "POST":
             fields = parse_qs(await request.text())
+            submitted_pyip = (fields.get("proxyip") or [""])[0]
             if "reset" in fields:
                 page.clear_preferred()
+                page.clear_proxyip()
                 saved = True
             else:
                 submitted = (fields.get("preferred") or [""])[0]
-                if page.set_preferred(submitted, cfg):
+                preferred_ok = bool(page.set_preferred(submitted, cfg))
+                proxyip_ok = page.set_proxyip(submitted_pyip) is not None or not submitted_pyip.strip()
+                if preferred_ok and proxyip_ok:
                     saved = True
-                else:
+                if not preferred_ok:
                     error = "没有可用的域名 / no usable hostname in that list"
+                elif not proxyip_ok:
+                    error = "proxyIP 格式不正确 / not a usable proxyIP"
         # ?preferred= previews a list for this response only; saving needs a POST.
         seen = page.preview(query["preferred"][0]) if "preferred" in query else None
 

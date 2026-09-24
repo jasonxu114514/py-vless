@@ -19,10 +19,46 @@ import base64
 from html import escape
 from urllib.parse import quote
 
-from config import HTTP_PORTS, HTTPS_PORTS, Config, parse_preferred
+from config import (
+    HTTP_PORTS,
+    HTTPS_PORTS,
+    Config,
+    parse_preferred,
+    parse_proxyip,
+)
 
 # Module-level so it survives across requests served by the same isolate.
 _override: list[str] | None = None
+
+# Sentinel distinguishing "not overridden" from "explicitly cleared".
+_UNSET = object()
+_proxyip_override = _UNSET
+
+
+def effective_proxyip(cfg: Config):
+    """The proxyIP in force: a per-isolate override, else the configured one."""
+    if _proxyip_override is _UNSET:
+        return cfg.proxyip
+    return parse_proxyip(_proxyip_override or None)
+
+
+def set_proxyip(value: str):
+    """Apply a submitted proxyIP. '' disables it; invalid input is rejected."""
+    global _proxyip_override
+    value = (value or "").strip()
+    if not value:
+        _proxyip_override = ""
+        return None
+    parsed = parse_proxyip(value)
+    if parsed is None:
+        return None
+    _proxyip_override = value
+    return parsed
+
+
+def clear_proxyip() -> None:
+    global _proxyip_override
+    _proxyip_override = _UNSET
 
 
 def effective_preferred(cfg: Config) -> list[str]:
@@ -60,9 +96,11 @@ h2 { font-size: .82rem; margin: 2rem 0 .6rem; text-transform: uppercase;
        background: rgba(127,127,127,.10); border-radius: 6px; padding: .5rem .7rem; }
 .row .tag { min-width: 5.5rem; opacity: .6; flex-shrink: 0; }
 .row code { flex: 1; overflow-wrap: anywhere; }
-textarea { width: 100%; font: inherit; padding: .65rem .75rem; border-radius: 6px;
+textarea, input[type=text] { width: 100%; font: inherit; padding: .65rem .75rem; border-radius: 6px;
            border: 1px solid rgba(127,127,127,.35); background: rgba(127,127,127,.08);
-           color: inherit; resize: vertical; min-height: 5.5rem; }
+           color: inherit; }
+textarea { resize: vertical; min-height: 5.5rem; margin-bottom: .6rem; }
+input[type=text] { margin-bottom: .2rem; }
 button { font: inherit; cursor: pointer; border: 0; border-radius: 5px;
          padding: .5rem .95rem; background: rgba(127,127,127,.25); }
 button:hover { background: rgba(127,127,127,.42); }
@@ -151,9 +189,14 @@ def render(
     for address in preferred:
         parts.append(_row("preferred", address))
 
+    active = effective_proxyip(cfg)
     parts += [
+        "<h2>proxyIP</h2>",
+        _row("proxyIP", str(active) if active else "not set"),
+        _row("pyip override", f"https://{host}/id/{cfg.uuid}?pyip={active or '<host[:port]>'}"),
         f"""<form method="post">
 <textarea name="preferred" spellcheck="false" placeholder="每行一个域名,或用逗号分隔">{escape(chr(10).join(preferred))}</textarea>
+<input type="text" name="proxyip" spellcheck="false" value="{escape(str(active) if active else '')}" placeholder="proxyIP,如 1.2.3.4 或 host:port;留空表示不启用">
 <div class="bar">
   <button type="submit">保存 / Save</button>
   <button type="submit" class="ghost" name="reset" value="1">恢复默认 / Reset</button>
@@ -178,6 +221,17 @@ def render(
         "The WebUI edit is kept in isolate memory: it is not global and does not survive a "
         "redeploy. For a persistent, global list, set the <code>preferred</code> environment "
         "variable (comma-separated).</p>",
+        '<p class="note">proxyIP 是一台<strong>不在 Cloudflare 边缘</strong>的第三方中转服务器。'
+        "Worker 不允许直连位于 Cloudflare 自己边缘上的源站,所以要访问 cloudflare.com、x.com、"
+        "chatgpt.com 这类站点,必须经 proxyIP 绕行。它靠<strong>沿用 TLS SNI</strong> 工作:"
+        "客户端的 ClientHello 里仍然写着真实目标,中转服务器据此转发。<br>"
+        "因此:只有真正走 TLS 的流量能透过 proxyIP;proxyIP 能看到它所中转流量的目标;"
+        "而且会消耗对方带宽 —— 这就是公共 proxyIP 经常失效的原因。建议自建。<br>"
+        "A proxyIP is a third-party relay that is NOT behind Cloudflare. The Worker cannot reach "
+        "origins on Cloudflare's own edge, so sites like cloudflare.com or x.com only work "
+        "through one. It works by keeping the original TLS SNI, which the relay routes on. Only "
+        "TLS traffic passes through it, it can see your destinations, and it costs its operator "
+        "bandwidth — which is why public ones keep disappearing. Prefer your own.</p>",
         '<p class="note">Cloudflare 前置的站点无法通过本代理访问(cloudflare.com、x.com、'
         "chatgpt.com 等):Worker 无法连接与自身同源边缘的站点。原版 JS 用 proxyIP 绕过,"
         "本版本未实现。<br>"

@@ -14,6 +14,9 @@
   // the form show the field; the Worker treats it as unset.
   "vars": {
     "uuid": "REPLACE_WITH_YOUR_UUID",
-    "preferred": "www.shopify.com,mfa.gov.ua,www.visa.cn,store.ubi.com"
+    "preferred": "www.shopify.com,mfa.gov.ua,www.visa.cn,store.ubi.com",
+    // Optional relay for reaching Cloudflare-fronted sites. Leave empty to
+    // disable; set to your own host, e.g. "1.2.3.4" or "proxy.example.com:8443".
+    "proxyip": ""
   }
 }

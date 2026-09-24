@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from vless import is_valid_uuid
 
@@ -49,10 +50,28 @@ PLACEHOLDERS = {
 }
 
 _HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$")
+_IPV4_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
+_IPV6_RE = re.compile(r"^[0-9a-f:]+$")
+
+# The proxyIP the JavaScript original ships with, kept here only as a documented
+# example. It is somebody else's server: traffic for Cloudflare-fronted sites
+# passes through it, so it is never used unless you configure it deliberately.
+PROXYIP_EXAMPLE = "pyip.ygkkk.dpdns.org"
 
 
 class ConfigError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class ProxyIP:
+    """A fallback relay used when a direct connection yields nothing."""
+
+    host: str
+    port: int = 443
+
+    def __str__(self) -> str:
+        return self.host if self.port == 443 else f"{self.host}:{self.port}"
 
 
 @dataclass(frozen=True)
@@ -61,6 +80,7 @@ class Config:
     path: str | None
     preferred: list[str]
     ws_path: str
+    proxyip: ProxyIP | None = None
 
     @property
     def path_is_enforced(self) -> bool:
@@ -100,6 +120,67 @@ def parse_preferred(raw: str | None, fallback: list[str]) -> list[str]:
     return out or list(fallback)
 
 
+def parse_proxyip(raw: str | None) -> ProxyIP | None:
+    """Parse `host`, `host:port`, `[v6]` or `[v6]:port`. None if unusable."""
+    if not raw:
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+
+    if value.startswith("["):
+        end = value.find("]")
+        if end == -1:
+            return None
+        host = value[1:end]
+        rest = value[end + 1 :]
+        if rest and not rest.startswith(":"):
+            return None
+        port = 443
+        if rest.startswith(":") and rest[1:].isdigit():
+            port = int(rest[1:])
+    elif value.count(":") == 1:
+        host, _, port_s = value.partition(":")
+        port = int(port_s) if port_s.isdigit() else 443
+    else:
+        # A bare hostname, a bare IPv4, or an unbracketed IPv6 literal.
+        host, port = value, 443
+
+    host = host.strip().lower()
+    if not 0 < port < 65536:
+        return None
+    if not (_HOST_RE.match(host) or _IPV4_RE.match(host) or _IPV6_RE.match(host)):
+        return None
+    return ProxyIP(host=host, port=port)
+
+
+def resolve_proxyip(cfg: Config, url: str) -> ProxyIP | None:
+    """proxyIP for one connection: a per-request override, else the configured one.
+
+    Two override spellings are accepted, both matching what the original scripts
+    and their generated links use:
+      * `/pyip=<host>` in the path (the original's own form, so existing client
+        configurations keep working);
+      * `?pyip=<host>` in the query, which is easier to set by hand.
+    An unusable override is ignored rather than fatal, falling back to the
+    configured value.
+    """
+    parts = urlsplit(url)
+    override = None
+    if "/pyip=" in parts.path:
+        override = parts.path.split("/pyip=", 1)[1].split("/")[0]
+    elif parts.query:
+        for item in parts.query.split("&"):
+            if item.startswith("pyip="):
+                override = item[5:]
+                break
+    if override:
+        parsed = parse_proxyip(override)
+        if parsed is not None:
+            return parsed
+    return cfg.proxyip
+
+
 def load(env) -> Config:
     """Build the config from the Worker's environment bindings."""
     raw_uuid = _get(env, "uuid")
@@ -125,9 +206,13 @@ def load(env) -> Config:
 
     preferred_raw = _get(env, "preferred")
 
+    # `pyip` is the shorter spelling used in the original scripts.
+    proxyip_raw = _get(env, "proxyip") or _get(env, "pyip")
+
     return Config(
         uuid=uuid,
         path=_get(env, "path"),
         preferred=parse_preferred(preferred_raw, DEFAULT_PREFERRED),
         ws_path=_get(env, "ws_path") or DEFAULT_WS_PATH,
+        proxyip=parse_proxyip(proxyip_raw),
     )
