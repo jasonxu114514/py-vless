@@ -198,6 +198,47 @@ What it cannot hide, and what it therefore does not try to hide:
 This raises the cost of fingerprinting the source. It is not a security
 boundary and should not be described as one.
 
+### Which fields are hidden
+
+The proxy-identifying surface is what matters, so that is what the transform
+targets. Measured on the shipped bundle:
+
+| Token | Before | After |
+| :--- | ---: | ---: |
+| `vless://` (the URI scheme) | 1 | **0** |
+| `VLESS` in prose | 9 | **0** |
+| `vless` as a module name | 5 | **0** |
+| `py-vless` labels | 2 | **0** |
+| `/pyip=` | 3 | **0** |
+| `ed=2560` | 2 | **0** |
+| `cloudflare-ech.com` | 2 | **0** |
+| `parse_header`, `build_links` | 7 | **0** |
+| `proxyip` | 46 | **30** (cannot be hidden) |
+
+The module files themselves are renamed too (`vless.py` becomes `Ij0H0e04.py`),
+which is what removes the module-name leak; `entry.py` keeps its name because
+`wrangler.jsonc` points at it.
+
+How each category is handled:
+
+* **Wire tokens** (`vless://`, `/pyip=`, the query keys) are *emitted*, never
+  compared against, so they are assembled at runtime from escaped fragments.
+  Behaviour is unchanged and a byte-for-byte copy of the generated link is
+  verified in the test suite.
+* **Docstrings** are kept readable with the identifying words blanked out.
+* **f-strings** carrying an identifying token are rebuilt: each piece stays an
+  f-string of its own, with the literal halves encoded and the `{...}`
+  expressions preserved. Emitting a bare `{expr}` outside an f-string makes
+  Python read it as a set literal, which is how this first broke.
+* **Module-level constants and runtime-resolved names** stay. `proxyip` survives
+  in the dataclass field, the attribute, and the `env` lookup, all of which are
+  matched by name at runtime.
+
+The one deliberate remnant is `py-vless` inside the WebUI's triple-quoted HTML
+title. Triple-quoted f-strings are not rebuilt: their expressions nest quotes and
+braces, reassembling them produced invalid syntax, and the title is not part of
+the wire format.
+
 ### Traps worth knowing if you touch the obfuscator
 
 Each of these produced a Worker that passed every local test and then failed in

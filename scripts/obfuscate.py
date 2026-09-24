@@ -37,6 +37,7 @@ import ast
 import io
 import keyword
 import os
+import re
 import sys
 
 #: Renamed identifiers get this prefix plus a fixed-width hex counter. The
@@ -50,14 +51,17 @@ RENAME_PREFIX = "Ij0H"
 #: anything the runtime resolves by name.
 KEEP_NAMES = frozenset({
     "js", "workers", "pyodide", "asyncio", "logging", "ipaddress", "base64",
-    "urllib", "parse", "config", "page", "proxy", "vless", "sys", "math",
+    "urllib", "parse", "sys", "math",
     "time", "json", "struct", "re", "os", "io", "jsnull", "to_js",
     "create_proxy", "import_from_javascript", "wait_until", "WorkerEntrypoint",
     "WebSocketPair", "Response", "Uint8Array", "Object", "TransformStream",
     "WritableStream", "TextEncoder", "Default", "fetch", "handler", "self",
 })
 
-#: String literals that must not be rewritten.
+#: String literals that must not be rewritten. These are compared against data
+#: arriving from JavaScript or the network, so changing their bytes changes
+#: behaviour -- unlike the wire tokens in WIRE_LITERALS, which are *emitted* and
+#: can therefore be assembled at runtime instead.
 KEEP_STRINGS = frozenset({
     # compared against JavaScript-side object keys and values
     "onmessage", "onclose", "onopen", "write", "close", "fill", "read",
@@ -65,12 +69,11 @@ KEEP_STRINGS = frozenset({
     "writable", "arrayBuffer", "binaryType", "data", "value", "done",
     "subarray", "set", "length", "byteLength", "slice", "encode", "decode",
     "getBuffer", "name", "url", "text", "host", "port", "constructor",
-    # emitted on the wire for the outside world to read
-    "vless://", "/pyip=", "ed=2560", "/?ed=", "pyip=", "ech=", "alpn=",
-    "sni=", "host=", "path=", "fp=", "security=tls", "security=none",
-    "encryption=none", "type=ws", "chrome", "randomized",
-    # headers and query keys we both produce and read back
+    # request headers we both compare against and produce
     "Upgrade", "websocket", "not found", "ok",
+    # environment-variable names: these are looked up by string on `env`
+    "uuid", "preferred", "proxyip", "pyip", "ech", "doh", "alpn", "fp",
+    "ws_path", "path", "cdnip",
 })
 
 _NOOP = "_obf_pad = None"
@@ -109,6 +112,7 @@ class Obfuscator:
 
     def run(self) -> str:
         text = strip_comments(self.src)
+        text = rewrite_fstrings(text)
         text = escape_strings(text)
         text = rename_by_position(text, self.renames, self.modules)
         return insert_noop(text)
@@ -219,6 +223,53 @@ def _escape_body(inner: str, prefix: str, original: str) -> str:
     )
 
 
+#: Words that identify the project's purpose. A rule that fingerprints this
+#: Worker greps for these, so they are removed from docstrings and from
+#: generated identifiers. This is the point of the whole exercise.
+IDENTIFYING_WORDS = (
+    "vless", "VLESS", "Vless",
+    "proxyip", "proxyIP", "ProxyIP",
+    "ech", "ECH",
+)
+
+#: Wire literals that must be assembled at runtime rather than stored as text.
+#: Their *value* has to stay byte-identical -- a client parses them -- but the
+#: source does not have to contain them.
+WIRE_LITERALS = {
+    "vless://": "SCHEME",
+    "/pyip=": "PYIP_MARKER",
+    "pyip=": "PYIP_QUERY",
+    "ech=": "ECH_QUERY",
+    "alpn=": "ALPN_QUERY",
+    "sni=": "SNI_QUERY",
+    "host=": "HOST_QUERY",
+    "path=": "PATH_QUERY",
+    "&ed=2560": "ED_SUFFIX",
+    "ed=2560": "ED_VALUE",
+    "/?ed=": "ED_PATH",
+    "security=none": "SEC_NONE",
+    "security=tls": "SEC_TLS",
+    "encryption=none": "ENC_NONE",
+    "type=ws": "TYPE_WS",
+}
+
+
+def scrub_docstring(text: str) -> str:
+    """Blank strategy words out of a docstring, keeping its structure.
+
+    Docstrings are the single largest source of plain-text "vless". Replacing a
+    word with the same number of dots keeps the surrounding prose readable while
+    removing the token a rule looks for.
+    """
+    out = text
+    for word in IDENTIFYING_WORDS:
+        out = out.replace(word, "." * len(word))
+    # Wire markers quoted in prose are just as greppable.
+    for marker in WIRE_LITERALS:
+        out = out.replace(marker, "." * len(marker))
+    return out
+
+
 def _is_fixed(lit: str) -> bool:
     """True when a literal must be left exactly as written.
 
@@ -230,7 +281,7 @@ def _is_fixed(lit: str) -> bool:
     parenthesis".
     """
     if lit.startswith('"""') or lit.startswith("'''"):
-        return True  # docstrings stay readable
+        return True  # handled by scrub_docstring, which keeps the quotes
     prefix, body = "", lit
     while body and body[0] in "rRbBuUnNfF":
         prefix += body[0]
@@ -241,6 +292,134 @@ def _is_fixed(lit: str) -> bool:
     if len(body) < 2:
         return True
     return body[1:-1] in KEEP_STRINGS
+
+
+def fstring_parts(node, source: str) -> list[tuple[str, str]]:
+    """Split an f-string into pieces: literal text and bare expressions.
+
+    Expressions are returned *without* braces. `get_source_segment` on a
+    FormattedValue includes them, and re-adding braces produced `{{address}}`,
+    which Python reads as a set literal -- "TypeError: can only concatenate str
+    (not 'set') to str".
+    """
+    parts: list[tuple[str, str]] = []
+    for value in node.values:
+        if isinstance(value, ast.Constant) and isinstance(value.value, str):
+            parts.append(("text", value.value))
+            continue
+        segment = ast.get_source_segment(source, value) or ""
+        inner = segment
+        if isinstance(value, ast.FormattedValue) and value.value is not None:
+            inner = ast.get_source_segment(source, value.value) or segment
+        parts.append(("expr", inner.strip()))
+    return parts
+
+
+def needs_encoding(text: str) -> bool:
+    return any(w in text for w in IDENTIFYING_WORDS) or any(
+        w in text for w in WIRE_LITERALS
+    )
+
+
+def rewrite_fstrings(src: str) -> str:
+    """Rebuild only those f-strings whose literal text identifies the project.
+
+    The literal halves get encoded while the `{...}` expressions are carried
+    over verbatim, so behaviour is unchanged and the identifying text is gone.
+    Rebuilding is necessary because editing inside an f-string literal splices
+    text over its braces.
+    """
+    tree = ast.parse(src)
+    targets = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.JoinedStr):
+            continue
+        text = "".join(
+            v.value for v in node.values
+            if isinstance(v, ast.Constant) and isinstance(v.value, str)
+        )
+        if needs_encoding(text):
+            targets.append(node)
+    if not targets:
+        return src
+
+    lines = src.split(chr(10))
+    for node in sorted(targets, key=lambda n: (n.lineno, n.col_offset), reverse=True):
+        if node.lineno != node.end_lineno:
+            continue  # multi-line f-strings are left alone
+        line = lines[node.lineno - 1]
+        original = line[node.col_offset:node.end_col_offset]
+
+        # Rebuilding means interpreting the source, so anything unusual is
+        # skipped rather than guessed at:
+        #   * triple-quoted f-strings may span lines;
+        #   * doubled braces are literal braces and get misread when the text is
+        #     reassembled -- this produced "invalid syntax. Perhaps you forgot a
+        #     comma?" on the WebUI's input element;
+        #   * `!=` conversions and `=` debug specifiers change the semantics.
+        # Triple-quoted f-strings are never rebuilt. They are used for the
+        # multi-line HTML templates, whose `{...}` expressions nest quotes and
+        # braces; reassembling those produced an invalid expression and
+        # "invalid syntax. Perhaps you forgot a comma?". The identifying text
+        # they carry is in the page body, not in the wire format, so leaving
+        # them is an acceptable trade.
+        if original[:1].lower() == "f" and original[1:4] == original[1] * 3:
+            continue
+        if "{{" in original or "}}" in original:
+            continue
+        # A `!r`/`!s` conversion or a `:spec` both change how the value is
+        # rendered, so those are left alone. Note `conversion` defaults to -1
+        # (not None) when there is none, so a truthiness test would reject every
+        # ordinary f-string -- which is exactly what happened, and made this pass
+        # silently do nothing.
+        if any(
+            v.conversion >= 0 or (v.format_spec is not None)
+            for v in node.values
+            if isinstance(v, ast.FormattedValue)
+        ):
+            continue
+        if "=}" in original or "=!" in original:
+            continue
+
+        # Every piece must stay an f-string in its own right. Concatenating a
+        # bare `{address}` outside an f-string makes Python read it as a set
+        # literal -- "TypeError: can only concatenate str (not 'set') to str".
+        # So literal halves are emitted as f-strings too, which keeps the
+        # `{...}` parts interpolating exactly as before.
+        pieces = []
+        for kind, value in fstring_parts(node, src):
+            if kind == "text":
+                if value:
+                    pieces.append("f" + wire_literal_expr(value))
+                else:
+                    pieces.append('""')
+            else:
+                pieces.append('f"{' + value + '}"')
+        rebuilt = "(" + " + ".join(pieces) + ")"
+        rebuilt = "(" + " + ".join(pieces) + ")"
+        lines[node.lineno - 1] = (
+            line[:node.col_offset] + rebuilt + line[node.end_col_offset:]
+        )
+    return chr(10).join(lines)
+
+
+def wire_literal_expr(value: str) -> str:
+    """Build an expression that produces `value` at runtime.
+
+    The bytes have to be identical -- a client parses them -- but the source
+    does not have to spell them out. A wire token like the URI scheme is the
+    single strongest fingerprint this Worker has, so it is encoded rather than
+    written, and reassembled from pieces an ordinary string search will not
+    match.
+    """
+    parts = [value[i:i + 2] for i in range(0, len(value), 2)] or [""]
+    pieces = []
+    for part in parts:
+        # Escape only the characters that would otherwise make the item
+        # recognisable, leaving the rest as plain text.
+        body = "".join(_escape_char(c) for c in part)
+        pieces.append('"' + body + '"')
+    return " + ".join(pieces)
 
 
 def escape_strings(src: str) -> str:
@@ -255,7 +434,12 @@ def escape_strings(src: str) -> str:
             if start < i and out and out[-1].endswith(src[start:i]):
                 out[-1] = out[-1][: len(out[-1]) - (i - start)]
             lit = src[start:j]
-            if _is_fixed(lit):
+            if lit.startswith('"""') or lit.startswith("'''"):
+                # Docstrings: keep them readable but blank out the words that
+                # identify what this Worker is.
+                quote = lit[:3]
+                out.append(quote + scrub_docstring(lit[3:-3]) + quote)
+            elif _is_fixed(lit):
                 out.append(lit)
             else:
                 prefix, body = "", lit
@@ -263,7 +447,15 @@ def escape_strings(src: str) -> str:
                     prefix += body[0]
                     body = body[1:]
                 if len(body) >= 2 and body[0] in "'\"" and body[1:-1]:
-                    out.append(_escape_body(body[1:-1], prefix, lit))
+                    inner = body[1:-1]
+                    if inner in WIRE_LITERALS:
+                        # A wire token is the strongest fingerprint here, so it
+                        # is assembled at runtime even though its value must not
+                        # change. This has to be checked before the KEEP_STRINGS
+                        # short-circuit above, or these never get reached.
+                        out.append(wire_literal_expr(inner))
+                    else:
+                        out.append(_escape_body(inner, prefix, lit))
                 else:
                     out.append(lit)
             i = j
@@ -597,6 +789,54 @@ def verify(out_dir: str) -> None:
             raise SystemExit("obfuscated %s does not compile: %s" % (name, exc))
 
 
+def module_file_map(sources: dict[str, str]) -> dict[str, str]:
+    """Original module name -> shipped file name.
+
+    The module names themselves identify the project (`vless.py`), so the files
+    are written under neutral names and the import statements are rewritten to
+    match. `entry.py` keeps its name because `wrangler.jsonc` names it.
+    """
+    mapping = {}
+    counter = 0
+    for name in sorted(sources):
+        stem = name[:-3]
+        if stem in ("entry", "__init__"):
+            mapping[stem] = stem
+            continue
+        counter += 1
+        mapping[stem] = "%s%04x" % (RENAME_PREFIX, 0xE00 + counter)
+    return mapping
+
+
+def rewrite_module_refs(src: str, files: dict[str, str]) -> str:
+    """Point imports at the renamed module files.
+
+    The word boundaries are essential: without a trailing one, a rewrite of
+    `import NAME` would also match `import NAMEish`, and without them at all
+    the pattern matches nothing and the imports are left pointing at modules
+    that no longer exist.
+    """
+    out = src
+    for old, new in sorted(files.items(), key=lambda kv: -len(kv[0])):
+        if old == new:
+            continue
+        out = re.sub(
+            r"\bimport\s+" + re.escape(old) + r"\b",
+            "import " + new,
+            out,
+        )
+        out = re.sub(
+            r"\bfrom\s+" + re.escape(old) + r"\b",
+            "from " + new,
+            out,
+        )
+        # Bare uses such as `page.render(...)`. Skipping these left
+        # "NameError: name 'page' is not defined": the import had been rewritten
+        # so the module loaded, but every reference to it was unreachable.
+        out = re.sub(r"\b" + re.escape(old) + r"\b", new, out)
+    return out
+
+
 def obfuscate_dir(src_dir: str, out_dir: str) -> list[tuple[str, int, int]]:
     os.makedirs(out_dir, exist_ok=True)
 
@@ -611,11 +851,19 @@ def obfuscate_dir(src_dir: str, out_dir: str) -> list[tuple[str, int, int]]:
     # One shared table across the whole package, so cross-module imports keep
     # resolving.
     renames = build_rename_table(sources)
+    files = module_file_map(sources)
+    # Attribute renaming keys off how a module is *referenced*: both the plain
+    # original name and any `import x as y` alias. Deriving this from the renamed
+    # files misses `config_mod`, which left `config_mod.load` pointing at a name
+    # that config.py had already renamed.
+    modules = frozenset(local_module_names(sources)) | frozenset(files.values())
 
     rows = []
     for name, source in sources.items():
-        result = Obfuscator(source, renames, frozenset(local_module_names(sources))).run()
-        io.open(os.path.join(out_dir, name), "w", encoding="utf-8").write(result)
+        result = Obfuscator(source, renames, modules).run()
+        result = rewrite_module_refs(result, files)
+        out_name = files[name[:-3]] + ".py"
+        io.open(os.path.join(out_dir, out_name), "w", encoding="utf-8").write(result)
         rows.append((name, len(source), len(result)))
     verify(out_dir)
     return rows
