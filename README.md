@@ -24,7 +24,7 @@ A VLESS node for Cloudflare Workers, written in Python.
    | :--- | :--- |
    | `uuid` | Your VLESS user id — a UUIDv4. Generate one with `python -c "import uuid; print(uuid.uuid4())"` or any UUID generator. **Required.** |
    | `preferred` | Preferred domains, comma-separated. Leave the default to start. |
-   | `proxyip` | Optional. A third-party relay for reaching Cloudflare-fronted sites. Leave empty to disable. |
+   | `proxyip` | Relay for reaching Cloudflare-fronted sites. Prefilled with a public address; clear it to turn the fallback off. |
 
 5. Click **Deploy**. When it finishes, Cloudflare shows your Worker URL, for example
    `https://py-vless.<your-subdomain>.workers.dev`.
@@ -57,7 +57,7 @@ Configure through environment variables. In the Cloudflare dashboard these live 
 | `preferred` | no | `www.shopify.com`,`mfa.gov.ua`,`www.visa.cn`,`store.ubi.com` | Comma-separated hostnames used as the **server address** in your node links. Any hostname that resolves onto Cloudflare's edge works, so you can swap in your own or a domain you already own. Up to 30. |
 | `path` | no | *(any path)* | If set, WebSocket upgrades are accepted only on this path. Leave unset unless you want to restrict it. |
 | `ws_path` | no | `/?ed=2560` | The path published inside the generated share links. `ed=2560` is the 0-RTT early-data hint that common clients use. Change it only if your client needs something different. |
-| `proxyip` | no | *(disabled)* | A third-party relay, as `host`, `host:port`, `[IPv6]` or `[IPv6]:port` (default port 443). Needed to reach **Cloudflare-fronted sites** (cloudflare.com, x.com, chatgpt.com): the Worker is not allowed to connect to origins on Cloudflare's own edge, so those must be routed around. Examples: `1.2.3.4`, `1.2.3.4:8443`, `proxy.example.com`, `[2001:db8::1]:8443`. Alias: `pyip`. |
+| `proxyip` | no | `proxyip.cmliussss.net` | Relay server, as `host`, `host:port`, `[IPv6]` or `[IPv6]:port` (default port 443). Needed to reach **Cloudflare-fronted sites** (cloudflare.com, x.com, chatgpt.com): the Worker is not allowed to connect to origins on Cloudflare's own edge, so those must be routed around. Examples: `1.2.3.4`, `1.2.3.4:8443`, `proxy.example.com`, `[2001:db8::1]:8443`. Alias: `pyip`. **An empty value disables it**; so does a malformed one, rather than falling back to the default. |
 
 ### About proxyIP
 
@@ -79,7 +79,10 @@ Three consequences worth understanding:
   any small VPS that is *not* behind Cloudflare, set up with something like
   [x-ui-yg](https://github.com/yonggekkk/x-ui-yg).
 
-Leave it unset and behaviour is exactly as before — direct connections only.
+The default is the public relay `proxyip.cmliussss.net`. **Setting it empty disables the
+fallback**, leaving direct connections only. A malformed value also disables it, deliberately:
+better a dead relay than one typo silently routing your traffic through a server you did not
+mean to use.
 
 You can also override it per connection, in either of these forms:
 
@@ -90,7 +93,8 @@ wss://…/?ed=2560&pyip=1.2.3.4      # in the client's WebSocket path
 ```
 
 Like `preferred`, the WebUI's proxyIP field is **per-isolate and does not survive a redeploy**.
-Use the environment variable for something lasting.
+Use the environment variable for something lasting. In the field, **blank means "use the
+default relay"**, `none` turns it off, and anything else is taken as an address.
 
 ## Using it
 

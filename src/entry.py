@@ -74,7 +74,7 @@ class Default(WorkerEntrypoint):
             else:
                 submitted = (fields.get("preferred") or [""])[0]
                 preferred_ok = bool(page.set_preferred(submitted, cfg))
-                proxyip_ok = page.set_proxyip(submitted_pyip) is not None or not submitted_pyip.strip()
+                proxyip_ok, _ = page.set_proxyip(submitted_pyip, cfg)
                 if preferred_ok and proxyip_ok:
                     saved = True
                 if not preferred_ok:

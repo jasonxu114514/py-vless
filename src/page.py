@@ -20,6 +20,7 @@ from html import escape
 from urllib.parse import quote
 
 from config import (
+    DEFAULT_PROXYIP,
     HTTP_PORTS,
     HTTPS_PORTS,
     Config,
@@ -42,18 +43,30 @@ def effective_proxyip(cfg: Config):
     return parse_proxyip(_proxyip_override or None)
 
 
-def set_proxyip(value: str):
-    """Apply a submitted proxyIP. '' disables it; invalid input is rejected."""
+# Spelled-out ways to turn the relay off, since a blank field means "default".
+_DISABLE_WORDS = {"none", "off", "disable", "disabled", "0"}
+
+
+def set_proxyip(value: str, cfg: Config):
+    """Apply a submitted proxyIP. Returns (accepted, effective).
+
+    A blank field means "go back to whatever is configured", so disabling the
+    relay has to be spelled out. Invalid input is rejected rather than silently
+    disabling, which would be a misconfiguration nobody notices.
+    """
     global _proxyip_override
-    value = (value or "").strip()
-    if not value:
+    text = (value or "").strip()
+    if text.lower() in _DISABLE_WORDS:
         _proxyip_override = ""
-        return None
-    parsed = parse_proxyip(value)
+        return True, None
+    if not text:
+        _proxyip_override = _UNSET
+        return True, effective_proxyip(cfg)
+    parsed = parse_proxyip(text)
     if parsed is None:
-        return None
-    _proxyip_override = value
-    return parsed
+        return False, None
+    _proxyip_override = text
+    return True, parsed
 
 
 def clear_proxyip() -> None:
@@ -190,13 +203,18 @@ def render(
         parts.append(_row("preferred", address))
 
     active = effective_proxyip(cfg)
+    is_builtin = active is not None and str(active) == DEFAULT_PROXYIP
     parts += [
         "<h2>proxyIP</h2>",
-        _row("proxyIP", str(active) if active else "not set"),
+        _row(
+            "proxyIP",
+            f"{active} (内置默认 / built-in default)" if is_builtin
+            else (str(active) if active else "已关闭 / disabled"),
+        ),
         _row("pyip override", f"https://{host}/id/{cfg.uuid}?pyip={active or '<host[:port]>'}"),
         f"""<form method="post">
 <textarea name="preferred" spellcheck="false" placeholder="每行一个域名,或用逗号分隔">{escape(chr(10).join(preferred))}</textarea>
-<input type="text" name="proxyip" spellcheck="false" value="{escape(str(active) if active else '')}" placeholder="proxyIP,如 1.2.3.4 或 host:port;留空表示不启用">
+<input type="text" name="proxyip" spellcheck="false" value="{escape('' if is_builtin else (str(active) if active else 'none'))}" placeholder="留空=用内置默认;填 none 关闭;或填 host / host:port">
 <div class="bar">
   <button type="submit">保存 / Save</button>
   <button type="submit" class="ghost" name="reset" value="1">恢复默认 / Reset</button>
@@ -221,6 +239,10 @@ def render(
         "The WebUI edit is kept in isolate memory: it is not global and does not survive a "
         "redeploy. For a persistent, global list, set the <code>preferred</code> environment "
         "variable (comma-separated).</p>",
+        f'<p class="note">当前默认使用公共 proxyIP <code>{DEFAULT_PROXYIP}</code>。输入框<b>留空</b>表示使用它,'
+        "填 <code>none</code> 表示关闭,或填你自己的地址。<br>"
+        f"The built-in default is the public relay <code>{DEFAULT_PROXYIP}</code>. Leave the field "
+        "<b>blank</b> to use it, enter <code>none</code> to disable, or enter your own address.</p>",
         '<p class="note">proxyIP 是一台<strong>不在 Cloudflare 边缘</strong>的第三方中转服务器。'
         "Worker 不允许直连位于 Cloudflare 自己边缘上的源站,所以要访问 cloudflare.com、x.com、"
         "chatgpt.com 这类站点,必须经 proxyIP 绕行。它靠<strong>沿用 TLS SNI</strong> 工作:"

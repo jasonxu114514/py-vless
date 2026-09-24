@@ -53,10 +53,12 @@ _HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z
 _IPV4_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}$")
 _IPV6_RE = re.compile(r"^[0-9a-f:]+$")
 
-# The proxyIP the JavaScript original ships with, kept here only as a documented
-# example. It is somebody else's server: traffic for Cloudflare-fronted sites
-# passes through it, so it is never used unless you configure it deliberately.
-PROXYIP_EXAMPLE = "pyip.ygkkk.dpdns.org"
+# Default relay for reaching Cloudflare-fronted sites. This is a third-party
+# public service, not ours: traffic to those sites passes through it, so it can
+# see your destinations and it costs its operator bandwidth (which is why public
+# relay addresses change over time). Set `proxyip` to your own, or to an empty
+# string to disable the fallback entirely.
+DEFAULT_PROXYIP = "proxyip.cmliussss.net"
 
 
 class ConfigError(Exception):
@@ -81,6 +83,10 @@ class Config:
     preferred: list[str]
     ws_path: str
     proxyip: ProxyIP | None = None
+
+    @property
+    def proxyip_is_default(self) -> bool:
+        return self.proxyip is not None and str(self.proxyip) == DEFAULT_PROXYIP
 
     @property
     def path_is_enforced(self) -> bool:
@@ -118,6 +124,17 @@ def parse_preferred(raw: str | None, fallback: list[str]) -> list[str]:
         if len(out) >= MAX_PREFERRED:
             break
     return out or list(fallback)
+
+
+def _get_raw(env, name: str) -> str | None:
+    """Like _get, but keeps a deliberately-blank value as "" rather than None."""
+    try:
+        value = getattr(env, name)
+    except AttributeError:
+        return None
+    if value is None:
+        return None
+    return str(value).strip()
 
 
 def parse_proxyip(raw: str | None) -> ProxyIP | None:
@@ -206,13 +223,21 @@ def load(env) -> Config:
 
     preferred_raw = _get(env, "preferred")
 
-    # `pyip` is the shorter spelling used in the original scripts.
-    proxyip_raw = _get(env, "proxyip") or _get(env, "pyip")
+    # `pyip` is the shorter spelling used in the original scripts. Read raw so
+    # that an explicit empty value means "disabled" and an absent one falls back
+    # to the default relay.
+    raw = _get_raw(env, "proxyip")
+    if raw is None:
+        raw = _get_raw(env, "pyip")
+    if raw is None:
+        proxyip = parse_proxyip(DEFAULT_PROXYIP)
+    else:
+        proxyip = parse_proxyip(raw)  # "" disables; junk falls back to None too
 
     return Config(
         uuid=uuid,
         path=_get(env, "path"),
         preferred=parse_preferred(preferred_raw, DEFAULT_PREFERRED),
         ws_path=_get(env, "ws_path") or DEFAULT_WS_PATH,
-        proxyip=parse_proxyip(proxyip_raw),
+        proxyip=proxyip,
     )

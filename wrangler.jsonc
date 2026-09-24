@@ -15,8 +15,9 @@
   "vars": {
     "uuid": "REPLACE_WITH_YOUR_UUID",
     "preferred": "www.shopify.com,mfa.gov.ua,www.visa.cn,store.ubi.com",
-    // Optional relay for reaching Cloudflare-fronted sites. Leave empty to
-    // disable; set to your own host, e.g. "1.2.3.4" or "proxy.example.com:8443".
-    "proxyip": ""
+    // Relay for reaching Cloudflare-fronted sites. Defaults to a public
+    // service: clear this field to turn the fallback off entirely, or replace
+    // it with your own relay, e.g. "1.2.3.4" or "proxy.example.com:8443".
+    "proxyip": "proxyip.cmliussss.net"
   }
 }

@@ -24,7 +24,7 @@
    | :--- | :--- |
    | `uuid` | 你的 VLESS 用户 ID,一个 UUIDv4。用 `python -c "import uuid; print(uuid.uuid4())"` 或任意 UUID 生成器生成。**必填。** |
    | `preferred` | 优选域名,逗号分隔。先留默认值即可。 |
-   | `proxyip` | 可选,第三方中转服务器,用于访问 Cloudflare 前置的站点。留空表示不启用。 |
+   | `proxyip` | 中转服务器,用于访问 Cloudflare 前置的站点。默认已填公共地址,留空则关闭。 |
 
 5. 点 **Deploy**。完成后会显示 Worker 地址,例如
    `https://py-vless.<你的子域>.workers.dev`。
@@ -56,7 +56,7 @@
 | `preferred` | 否 | `www.shopify.com`,`mfa.gov.ua`,`www.visa.cn`,`store.ubi.com` | 逗号分隔的域名列表,会被用作节点链接里的**服务器地址**。任何解析到 Cloudflare 边缘的域名都行,也可以换成你自己的域名。最多 30 个。 |
 | `path` | 否 | *(任意路径)* | 设置后,只接受该路径上的 WebSocket 升级。除非想收紧限制,否则不用设。 |
 | `ws_path` | 否 | `/?ed=2560` | 生成的分享链接里公布的路径。`ed=2560` 是常见客户端使用的 0-RTT early data 提示值。除非客户端有特殊要求,否则不用改。 |
-| `proxyip` | 否 | *(不启用)* | 第三方中转服务器,格式 `host`、`host:port`、`[IPv6]` 或 `[IPv6]:port`(默认端口 443)。用于访问 **Cloudflare 前置的站点**(cloudflare.com、x.com、chatgpt.com 等):Worker 不允许直连与自身同源边缘的站点,必须经它绕行。写法 `1.2.3.4` / `1.2.3.4:8443` / `proxy.example.com` / `[2001:db8::1]:8443`。别名 `pyip`。 |
+| `proxyip` | 否 | `proxyip.cmliussss.net` | 中转服务器,格式 `host`、`host:port`、`[IPv6]` 或 `[IPv6]:port`(默认端口 443)。用于访问 **Cloudflare 前置的站点**(cloudflare.com、x.com、chatgpt.com 等):Worker 不允许直连与自身同源边缘的站点,必须经它绕行。写法 `1.2.3.4` / `1.2.3.4:8443` / `proxy.example.com` / `[2001:db8::1]:8443`。别名 `pyip`。**留空表示关闭**;值不合法时也会关闭,而不会回退到默认中转。 |
 
 ### 关于 proxyIP
 
@@ -74,7 +74,8 @@ Cloudflare 不允许 Worker 连接到位于**它自己边缘**上的源站,所�
 * **它会消耗对方带宽**,所以公共 proxyIP 经常失效。建议自建:一台不在 Cloudflare 的小鸡,
   用 [x-ui-yg](https://github.com/yonggekkk/x-ui-yg) 之类的脚本即可开出一个。
 
-不填就不启用,直连行为与之前完全一致。
+默认值是公共中转 `proxyip.cmliussss.net`。**留空即关闭**,直连行为等同于没有这个功能;
+填了但格式不合法时同样关闭 —— 这是刻意的,免得一个笔误把你的流量悄悄送进一台你没打算用的服务器。
 
 也可以按单个连接覆盖,两种写法都支持:
 
@@ -85,7 +86,7 @@ wss://…/?ed=2560&pyip=1.2.3.4      # 客户端 ws 路径里改
 ```
 
 网页里的 proxyIP 输入框和 `preferred` 一样是 **per-isolate、重新部署后失效**,要长期生效请用
-环境变量。
+环境变量。输入框**留空 = 用默认中转**,填 `none` = 关闭,或填自己的地址。
 
 ## 使用
 
