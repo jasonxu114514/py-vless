@@ -56,7 +56,33 @@
 | `preferred` | 否 | `www.shopify.com`,`mfa.gov.ua`,`www.visa.cn`,`store.ubi.com` | 逗号分隔的域名列表,会被用作节点链接里的**服务器地址**。任何解析到 Cloudflare 边缘的域名都行,也可以换成你自己的域名。最多 30 个。 |
 | `path` | 否 | *(任意路径)* | 设置后,只接受该路径上的 WebSocket 升级。除非想收紧限制,否则不用设。 |
 | `ws_path` | 否 | `/?ed=2560` | 生成的分享链接里公布的路径。`ed=2560` 是常见客户端使用的 0-RTT early data 提示值。除非客户端有特殊要求,否则不用改。 |
+| `ech` | 否 | `cloudflare-ech.com+https://cloudflare-dns.com/dns-query` | **Encrypted Client Hello**。Worker 域名被 SNI 阻断时,普通 TLS 节点会全部失效 —— ECH 让外层 ClientHello 显示别的域名,真实 SNI 加密在内。只有 TLS(443 系)节点带这个参数。写法:`off` 关闭;`auto` 用内置域名;`<域名>` 只换外层域名;`<域名>+<DoH地址>` 两者都自定义(也可用 `|` 分隔)。 |
+| `doh` | 否 | `https://cloudflare-dns.com/dns-query` | 查询 ECH 配置用的 DoH 服务器(该域名的 HTTPS DNS 记录)。 |
+| `alpn` | 否 | `http/1.1` | **必须是 `http/1.1`**。WebSocket 传输走 HTTP/1.1 Upgrade,若服务端选中 h2 会报 `websocket: protocol "h2" is not supported`。实测把 h2 放进列表会让所有节点失效。留空则不带该参数。 |
+| `fp` | 否 | `chrome` | TLS 指纹。**开了 ECH 就不能用 `randomized`**:它会随机挑曲线,导致 Go 构建外层 ClientHello 失败并报 `tls: malformed outer client hello`。原版脚本用 randomized,这里是有意改的。 |
 | `proxyip` | 否 | `proxyip.cmliussss.net` | 中转服务器,格式 `host`、`host:port`、`[IPv6]` 或 `[IPv6]:port`(默认端口 443)。用于访问 **Cloudflare 前置的站点**(cloudflare.com、x.com、chatgpt.com 等):Worker 不允许直连与自身同源边缘的站点,必须经它绕行。写法 `1.2.3.4` / `1.2.3.4:8443` / `proxy.example.com` / `[2001:db8::1]:8443`。别名 `pyip`。**留空表示关闭**;值不合法时也会关闭,而不会回退到默认中转。 |
+
+### 关于 ECH
+
+你的 Worker 域名(`*.workers.dev`)如果被 SNI 阻断,**所有 TLS 节点都会失效** —— 因为普通
+TLS 会把真实域名明文写在 ClientHello 里,阻断设备一眼就看见。
+
+ECH 把这件事反过来:让**外层** ClientHello 显示另一个域名,而真实 SNI 加密在内层。只要那个
+外层域名没被阻断,节点就还能用。默认外层域名是 `cloudflare-ech.com`(Cloudflare 在它的
+HTTPS DNS 记录里公开了 ECH 公钥),通过 Cloudflare 的 DoH 查询。
+
+实测结论(用 xray-core 26.3.27 打真实 Worker):
+
+| 配置 | 结果 |
+| :--- | :--- |
+| `fp=chrome` + `alpn=http/1.1` + ECH | ✅ 全部通(含 CF 前置站点) |
+| `fp=randomized` + ECH | ❌ `tls: malformed outer client hello`,所有节点失效 |
+| `alpn=h2,http/1.1` + `type=ws` | ❌ `websocket: protocol "h2" is not supported` |
+
+所以订阅里生成的链接是 `fp=chrome` + `alpn=http/1.1`。
+
+> 注意:EHC 值不合法时**必须留空而不是写错**。Xray 在解析失败时会故意塞一个无效配置让连接
+> 直接失败,而不是降级为无 ECH —— 一个笔误会让你完全连不上。
 
 ### 关于 proxyIP
 

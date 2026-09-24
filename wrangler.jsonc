@@ -18,6 +18,9 @@
     // Relay for reaching Cloudflare-fronted sites. Defaults to a public
     // service: clear this field to turn the fallback off entirely, or replace
     // it with your own relay, e.g. "1.2.3.4" or "proxy.example.com:8443".
-    "proxyip": "proxyip.cmliussss.net"
+    "proxyip": "proxyip.cmliussss.net",
+    // Encrypted Client Hello. "off" disables; "auto" uses the built-in public
+    // name; or give "<name>" / "<name>+<DoH-url>". Only affects TLS nodes.
+    "ech": "cloudflare-ech.com+https://cloudflare-dns.com/dns-query"
   }
 }

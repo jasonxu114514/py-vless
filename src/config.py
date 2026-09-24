@@ -60,9 +60,51 @@ _IPV6_RE = re.compile(r"^[0-9a-f:]+$")
 # string to disable the fallback entirely.
 DEFAULT_PROXYIP = "proxyip.cmliussss.net"
 
+# Encrypted Client Hello. The point of ECH is that the *outer* ClientHello shows
+# a name other than your own, so a Worker hostname that is blocked can still be
+# reached. The outer name must publish an ECH config in its DNS HTTPS record;
+# Cloudflare publishes one for cloudflare-ech.com (and for *.workers.dev too).
+#
+# The value is emitted in the form Xray understands for a DNS lookup:
+#     <name-to-query>+<DoH endpoint>
+# Xray queries the HTTPS (type 65) record for that name at that DoH server and
+# extracts the `ech` parameter. A malformed value makes Xray substitute a
+# deliberately invalid config so the connection FAILS, rather than silently
+# downgrading to an unencrypted handshake -- so it is better to omit ECH than to
+# emit something wrong.
+ECH_PUBLIC_NAME = "cloudflare-ech.com"
+DEFAULT_DOH = "https://cloudflare-dns.com/dns-query"
+
+# TLS client fingerprint for the generated links.
+#
+# MUST NOT be "randomized" when ECH is enabled. Xray's randomized fingerprint
+# picks a random curve/set per connection, and Go's TLS then fails to build the
+# ECH outer ClientHello:
+#     tls: malformed outer client hello
+# (and, without ECH, sometimes `tls: CurvePreferences includes unsupported
+# curve`). Verified against a live Worker: chrome + ECH => 200,
+# randomized + ECH => every node fails. The original scripts use randomized, so
+# this is a deliberate departure.
+DEFAULT_FP = "chrome"
+
 
 class ConfigError(Exception):
     pass
+
+
+@dataclass(frozen=True)
+class Ech:
+    """Resolved ECH settings for the generated links."""
+
+    #: name whose HTTPS record carries the ECH config
+    outer_name: str
+    #: DoH endpoint Xray should query it from
+    doh: str
+
+    @property
+    def param(self) -> str:
+        """The `ech=` value in the form Xray expects for a DNS lookup."""
+        return f"{self.outer_name}+{self.doh}"
 
 
 @dataclass(frozen=True)
@@ -83,6 +125,15 @@ class Config:
     preferred: list[str]
     ws_path: str
     proxyip: ProxyIP | None = None
+    ech: Ech | None = None
+    #: ALPN advertised in the links, or "" to omit the parameter.
+    #: Must be http/1.1 for `type=ws`: Xray's WebSocket transport performs an
+    #: HTTP/1.1 Upgrade, and if the server selects h2 the dial fails with
+    #: `websocket: protocol "h2" was given but is not supported`. Verified
+    #: against a live Worker -- putting h2 in this list breaks every node.
+    alpn: str = "http/1.1"
+    #: TLS client fingerprint advertised in the links.
+    fp: str = DEFAULT_FP
 
     @property
     def proxyip_is_default(self) -> bool:
@@ -171,6 +222,39 @@ def parse_proxyip(raw: str | None) -> ProxyIP | None:
     return ProxyIP(host=host, port=port)
 
 
+def parse_ech(raw: str | None, doh_default: str = DEFAULT_DOH) -> Ech | None:
+    """Parse the `ech` setting.
+
+    Accepts, case-insensitively:
+      * off / none / no / 0 / ""   -> ECH disabled
+      * on / auto / yes / y        -> the built-in public name
+      * <name>                     -> that name, at the default DoH
+      * <name>+<doh> / <name>|<doh>-> that name at that DoH endpoint
+    """
+    if raw is None:
+        return None
+    text = raw.strip()
+    if not text or text.lower() in {"off", "none", "no", "n", "0", "false", "disable"}:
+        return None
+    if text.lower() in {"on", "auto", "yes", "y", "1", "true", "enable"}:
+        return Ech(ECH_PUBLIC_NAME, doh_default)
+
+    for sep in ("+", "|"):
+        if sep in text:
+            name, _, doh = text.partition(sep)
+            name, doh = name.strip().lower(), doh.strip()
+            if not name or not doh.startswith("https://"):
+                return None
+            if not _HOST_RE.match(name):
+                return None
+            return Ech(name, doh)
+
+    name = text.lower()
+    if not _HOST_RE.match(name):
+        return None
+    return Ech(name, doh_default)
+
+
 def resolve_proxyip(cfg: Config, url: str) -> ProxyIP | None:
     """proxyIP for one connection: a per-request override, else the configured one.
 
@@ -234,10 +318,16 @@ def load(env) -> Config:
     else:
         proxyip = parse_proxyip(raw)  # "" disables; junk falls back to None too
 
+    doh = _get(env, "doh") or DEFAULT_DOH
+    ech = parse_ech(_get_raw(env, "ech"), doh)
+
     return Config(
         uuid=uuid,
         path=_get(env, "path"),
         preferred=parse_preferred(preferred_raw, DEFAULT_PREFERRED),
         ws_path=_get(env, "ws_path") or DEFAULT_WS_PATH,
         proxyip=proxyip,
+        ech=ech,
+        alpn=_get(env, "alpn") or "http/1.1",
+        fp=_get(env, "fp") or DEFAULT_FP,
     )

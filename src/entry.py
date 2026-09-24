@@ -51,6 +51,10 @@ class Default(WorkerEntrypoint):
             preview = (
                 page.preview(query["preferred"][0]) if "preferred" in query else None
             )
+            if "pyip" in query:
+                page.set_proxyip(query["pyip"][0], cfg)
+            if "ech" in query:
+                page.set_ech(query["ech"][0], cfg)
             return self._subscription(cfg, host, query, preview)
 
         if path == "/":
@@ -67,22 +71,31 @@ class Default(WorkerEntrypoint):
         if method == "POST":
             fields = parse_qs(await request.text())
             submitted_pyip = (fields.get("proxyip") or [""])[0]
+            submitted_ech = (fields.get("ech") or [""])[0]
             if "reset" in fields:
                 page.clear_preferred()
                 page.clear_proxyip()
+                page.clear_ech()
                 saved = True
             else:
                 submitted = (fields.get("preferred") or [""])[0]
                 preferred_ok = bool(page.set_preferred(submitted, cfg))
                 proxyip_ok, _ = page.set_proxyip(submitted_pyip, cfg)
-                if preferred_ok and proxyip_ok:
+                ech_ok, _ = page.set_ech(submitted_ech, cfg)
+                if preferred_ok and proxyip_ok and ech_ok:
                     saved = True
                 if not preferred_ok:
                     error = "没有可用的域名 / no usable hostname in that list"
                 elif not proxyip_ok:
                     error = "proxyIP 格式不正确 / not a usable proxyIP"
-        # ?preferred= previews a list for this response only; saving needs a POST.
+                elif not ech_ok:
+                    error = "ECH 格式不正确 / not a usable ECH setting"
+        # ?preferred= / ?pyip= / ?ech= preview for this response only; saving needs a POST.
         seen = page.preview(query["preferred"][0]) if "preferred" in query else None
+        if "pyip" in query:
+            page.set_proxyip(query["pyip"][0], cfg)
+        if "ech" in query:
+            page.set_ech(query["ech"][0], cfg)
 
         return Response(
             page.render(cfg, host, saved=saved, error=error, preferred=seen),

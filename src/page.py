@@ -20,10 +20,13 @@ from html import escape
 from urllib.parse import quote
 
 from config import (
+    DEFAULT_DOH,
     DEFAULT_PROXYIP,
+    ECH_PUBLIC_NAME,
     HTTP_PORTS,
     HTTPS_PORTS,
     Config,
+    parse_ech,
     parse_preferred,
     parse_proxyip,
 )
@@ -34,6 +37,35 @@ _override: list[str] | None = None
 # Sentinel distinguishing "not overridden" from "explicitly cleared".
 _UNSET = object()
 _proxyip_override = _UNSET
+_ech_override = _UNSET
+
+
+def effective_ech(cfg: Config):
+    """The ECH settings in force: a per-isolate override, else the configured."""
+    if _ech_override is _UNSET:
+        return cfg.ech
+    return parse_ech(_ech_override or None, cfg.ech.doh if cfg.ech else DEFAULT_DOH)
+
+
+def set_ech(value: str, cfg: Config):
+    """Apply a submitted ECH setting. Returns (accepted, effective)."""
+    global _ech_override
+    text = (value or "").strip()
+    if not text:
+        _ech_override = _UNSET
+        return True, effective_ech(cfg)
+    parsed = parse_ech(text, cfg.ech.doh if cfg.ech else DEFAULT_DOH)
+    if parsed is None and text.lower() not in {
+        "off", "none", "no", "n", "0", "false", "disable"
+    }:
+        return False, None
+    _ech_override = text
+    return True, parsed
+
+
+def clear_ech() -> None:
+    global _ech_override
+    _ech_override = _UNSET
 
 
 def effective_proxyip(cfg: Config):
@@ -127,7 +159,9 @@ button.ghost { background: transparent; border: 1px solid rgba(127,127,127,.4); 
 """
 
 
-def _vless_uri(cfg: Config, host: str, address: str, port: str, tls: bool) -> str:
+def _vless_uri(
+    cfg: Config, host: str, address: str, port: str, tls: bool, ech=None
+) -> str:
     params = {
         "encryption": "none",
         "security": "tls" if tls else "none",
@@ -137,7 +171,14 @@ def _vless_uri(cfg: Config, host: str, address: str, port: str, tls: bool) -> st
     }
     if tls:
         params["sni"] = host
-        params["fp"] = "randomized"
+        params["fp"] = cfg.fp
+        if ech is not None:
+            # Encrypted Client Hello: the outer ClientHello carries `outer_name`
+            # instead of `host`, so a blocked Worker hostname still connects.
+            # Only meaningful with TLS, hence inside this branch.
+            params["ech"] = ech.param
+            if cfg.alpn:
+                params["alpn"] = cfg.alpn
     query = "&".join(f"{k}={quote(str(v), safe='')}" for k, v in params.items())
     label = f"py-vless-{address}:{port}"
     return f"vless://{cfg.uuid}@{address}:{port}?{query}#{quote(label)}"
@@ -148,13 +189,14 @@ def build_links(
 ) -> tuple[list[str], list[str]]:
     """Return (plaintext 80-series links, TLS 443-series links)."""
     addresses = preferred if preferred else effective_preferred(cfg)
+    ech = effective_ech(cfg)
     plain = [
         _vless_uri(cfg, host, address, port, tls=False)
         for address in addresses
         for port in HTTP_PORTS
     ]
     secure = [
-        _vless_uri(cfg, host, address, port, tls=True)
+        _vless_uri(cfg, host, address, port, tls=True, ech=ech)
         for address in addresses
         for port in HTTPS_PORTS
     ]
@@ -204,6 +246,9 @@ def render(
 
     active = effective_proxyip(cfg)
     is_builtin = active is not None and str(active) == DEFAULT_PROXYIP
+    ech = effective_ech(cfg)
+    ech_value = ech.param if ech else "off"
+    q_ = f"({ech.doh})" if ech else ""
     parts += [
         "<h2>proxyIP</h2>",
         _row(
@@ -212,6 +257,11 @@ def render(
             else (str(active) if active else "已关闭 / disabled"),
         ),
         _row("pyip override", f"https://{host}/id/{cfg.uuid}?pyip={active or '<host[:port]>'}"),
+        "<h2>ECH (Encrypted Client Hello)</h2>",
+        _row("ech", ech_value),
+        _row("note", "TLS(443 系)节点有效 / applies to the TLS 443-series nodes"),
+        f"""<input type="text" name="ech" spellcheck="false" value="{escape(ech_value)}" placeholder="off / auto / <域名> / <域名>+<DoH地址>">""",
+        _row("ech override", f"https://{host}/id/{cfg.uuid}?ech={quote(ech_value, safe='')}"),
         f"""<form method="post">
 <textarea name="preferred" spellcheck="false" placeholder="每行一个域名,或用逗号分隔">{escape(chr(10).join(preferred))}</textarea>
 <input type="text" name="proxyip" spellcheck="false" value="{escape('' if is_builtin else (str(active) if active else 'none'))}" placeholder="留空=用内置默认;填 none 关闭;或填 host / host:port">
@@ -254,6 +304,28 @@ def render(
         "through one. It works by keeping the original TLS SNI, which the relay routes on. Only "
         "TLS traffic passes through it, it can see your destinations, and it costs its operator "
         "bandwidth — which is why public ones keep disappearing. Prefer your own.</p>",
+        f'<p class="note"><b>ECH 的作用</b>:普通 TLS 会把真实 SNI(你的 Worker 域名)明文写在 '
+        "ClientHello 里,一旦该域名被阻断,TLS 节点就全部不可用。ECH 让<b>外层</b> ClientHello 显示"
+        f"另一个域名,而<b>内层</b>才是真实 SNI —— 所以只要外层域名不被阻断,你的节点就还能用。"
+        f"目前配置为外层域名 <code>{ech.outer_name if ech else ''}</code>"
+        f"{q_ or ''},通过 <code>{ech.doh if ech else ''}</code> 查询它的 HTTPS DNS 记录取得 ECH 公钥。"
+        "**只对 TLS(443 系)节点有效**,80 系明文节点是明文,没有 SNI 可保护。<br>"
+        "写法:<code>off</code> 关闭;<code>auto</code> 用内置的 "
+        f"<code>{ECH_PUBLIC_NAME}</code>;<code>&lt;域名&gt;</code> 只换外层域名;"
+        "<code>&lt;域名&gt;+&lt;DoH地址&gt;</code> 两者都自定义(也可用 <code>|</code> 分隔,更好输入)。<br>"
+        "注意 <code>alpn</code> 必须是 <code>http/1.1</code>:WebSocket 传输走的是 HTTP/1.1 Upgrade,"
+        "若服务端选中 h2,握手会失败并报 <code>websocket: protocol \"h2\" is not supported</code>。"
+        "实测把 <code>h2</code> 放进列表会让所有节点失效。<br>"
+        "注意:<b>ECH 值不合法时必须留空而不是写错</b> —— Xray 在解析失败时会故意使用一个无效配置"
+        "让连接直接失败,而不是降级为无 ECH。<br>"
+        "<b>What ECH buys you:</b> normally the real SNI (your Worker hostname) travels in cleartext in "
+        "the ClientHello, so blocking that name kills every TLS node. ECH puts a different name in the "
+        "<i>outer</i> ClientHello and the real one inside, so the nodes keep working as long as the "
+        "outer name is not blocked. TLS (443-series) nodes only — the plaintext 80-series nodes have no "
+        "SNI to protect. <code>off</code> disables, <code>auto</code> uses the built-in "
+        f"<code>{ECH_PUBLIC_NAME}</code>, <code>&lt;name&gt;</code> changes just the outer name, and "
+        "<code>&lt;name&gt;+&lt;DoH&gt;</code> sets both. A malformed value makes the connection fail "
+        "rather than silently downgrade, so leave it empty instead of guessing.</p>",
         '<p class="note">Cloudflare 前置的站点无法通过本代理访问(cloudflare.com、x.com、'
         "chatgpt.com 等):Worker 无法连接与自身同源边缘的站点。原版 JS 用 proxyIP 绕过,"
         "本版本未实现。<br>"

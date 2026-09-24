@@ -57,7 +57,36 @@ Configure through environment variables. In the Cloudflare dashboard these live 
 | `preferred` | no | `www.shopify.com`,`mfa.gov.ua`,`www.visa.cn`,`store.ubi.com` | Comma-separated hostnames used as the **server address** in your node links. Any hostname that resolves onto Cloudflare's edge works, so you can swap in your own or a domain you already own. Up to 30. |
 | `path` | no | *(any path)* | If set, WebSocket upgrades are accepted only on this path. Leave unset unless you want to restrict it. |
 | `ws_path` | no | `/?ed=2560` | The path published inside the generated share links. `ed=2560` is the 0-RTT early-data hint that common clients use. Change it only if your client needs something different. |
+| `ech` | no | `cloudflare-ech.com+https://cloudflare-dns.com/dns-query` | **Encrypted Client Hello.** If your Worker hostname is SNI-blocked, every TLS node dies — ECH makes the *outer* ClientHello show another name while the real SNI is encrypted inside. Only the TLS (443-series) nodes carry it. Forms: `off`; `auto`; `<name>`; `<name>+<DoH>` (or `|` instead of `+`). |
+| `doh` | no | `https://cloudflare-dns.com/dns-query` | DoH server used to look up the ECH config (the name's DNS HTTPS record). |
+| `alpn` | no | `http/1.1` | **Must be `http/1.1`.** The WebSocket transport performs an HTTP/1.1 Upgrade; if the server picks h2 you get `websocket: protocol "h2" is not supported`. Putting h2 in this list breaks every node. Blank omits the parameter. |
+| `fp` | no | `chrome` | TLS fingerprint. **`randomized` cannot be used with ECH**: it picks a random curve and Go then fails to build the outer ClientHello (`tls: malformed outer client hello`). The original scripts use randomized; this is a deliberate change. |
 | `proxyip` | no | `proxyip.cmliussss.net` | Relay server, as `host`, `host:port`, `[IPv6]` or `[IPv6]:port` (default port 443). Needed to reach **Cloudflare-fronted sites** (cloudflare.com, x.com, chatgpt.com): the Worker is not allowed to connect to origins on Cloudflare's own edge, so those must be routed around. Examples: `1.2.3.4`, `1.2.3.4:8443`, `proxy.example.com`, `[2001:db8::1]:8443`. Alias: `pyip`. **An empty value disables it**; so does a malformed one, rather than falling back to the default. |
+
+### About ECH
+
+If your Worker hostname (`*.workers.dev`) is SNI-blocked, **every TLS node stops working** —
+ordinary TLS puts the real name in cleartext in the ClientHello, where a blocking device can
+read it.
+
+ECH inverts that: the *outer* ClientHello shows a different name, and the real SNI is encrypted
+inside. As long as the outer name is not blocked, the nodes keep working. The default outer name
+is `cloudflare-ech.com` (Cloudflare publishes its ECH key in that name's HTTPS DNS record),
+looked up over Cloudflare's DoH.
+
+Measured with xray-core 26.3.27 against a live Worker:
+
+| Configuration | Result |
+| :--- | :--- |
+| `fp=chrome` + `alpn=http/1.1` + ECH | ✅ everything works, including Cloudflare-fronted sites |
+| `fp=randomized` + ECH | ❌ `tls: malformed outer client hello` — every node fails |
+| `alpn=h2,http/1.1` + `type=ws` | ❌ `websocket: protocol "h2" is not supported` |
+
+That is why the generated links use `fp=chrome` with `alpn=http/1.1`.
+
+> A malformed ECH value makes Xray substitute a deliberately invalid config so the connection
+> fails, rather than downgrading to no ECH — so a typo here takes you fully offline. Prefer
+> leaving it empty over guessing.
 
 ### About proxyIP
 
